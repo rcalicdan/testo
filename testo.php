@@ -43,6 +43,7 @@ return new ApplicationConfig(
         require 'tests/Test/suites.php',
         require 'tests/Codecov/suites.php',
         require 'tests/Repeat/suites.php',
+        require 'tests/Parallel/suites.php', 
     ),
     plugins: [
         new \Testo\Codecov\CodecovPlugin(

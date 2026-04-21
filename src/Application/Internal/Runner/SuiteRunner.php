@@ -27,13 +27,11 @@ use Testo\Pipeline\Pipeline;
 use Testo\Parallel\Internal\ParallelInput;
 use Hibla\Parallel\Parallel;
 use Hibla\Parallel\Interfaces\ProcessPoolInterface;
-use Hibla\Parallel\Utilities\SystemUtilities;
 use Hibla\Parallel\ValueObjects\WorkerMessage;
 use Hibla\Promise\Promise;
 use Hibla\Promise\Interfaces\PromiseInterface;
 use Internal\Container\ObjectContainer;
 use Testo\Application\Config\DefaultServicesConfig;
-use Testo\Common\Info;
 
 use function Hibla\await;
 
@@ -135,8 +133,11 @@ final readonly class SuiteRunner
         $results = [];
         $status = Status::Passed;
         $promises = [];
+        $dispatchedCases = [];
 
-        $pool = $this->createWorkerPool();
+        $pool = Parallel::pool(size: $this->parallelInput->getPoolSize())
+            ->withoutTimeout()
+            ->withUnlimitedMemory();;
 
         foreach ($suite->testCases->getCases() as $caseDefinition) {
             // Fallback to sequential for standalone (procedural) functions as they lack a ReflectionClass container
@@ -149,39 +150,40 @@ final readonly class SuiteRunner
 
             // Dispatch task to Hibla Process Pool
             $promises[] = $this->dispatchCaseToPool($pool, $caseDefinition, $filter);
+            $dispatchedCases[] = $caseDefinition;
         }
 
         try {
-            // Await all parallel execution promises to complete
+            // Await all parallel execution promises to complete safely using allSettled()
+            // This guarantees one crashing worker won't cancel the remaining workers.
             if ($promises !== []) {
-                /** @var list<CaseResult> $caseResults */
-                $caseResults = await(Promise::all($promises));
+                $settledResults = await(Promise::allSettled($promises));
 
-                foreach ($caseResults as $caseResult) {
-                    $results[] = $caseResult;
-                    if ($caseResult->status->isFailure()) {
-                        $status = Status::Failed;
+                foreach ($settledResults as $index => $settled) {
+                    if ($settled->isFulfilled()) {
+                        /** @var CaseResult $caseResult */
+                        $caseResult = $settled->value;
+                        $results[] = $caseResult;
+
+                        if ($caseResult->status->isFailure()) {
+                            $status = Status::Failed;
+                        }
+                    } elseif ($settled->isRejected()) {
+                        // Worker hard-crashed (OOM, Segfault, Timeout)
+                        // map the failure to a synthetic CaseResult so Testo reports it gracefully
+                        $status = Status::Error;
+                        $results[] = $this->createCrashResult($dispatchedCases[$index], $settled->reason);
                     }
                 }
             }
         } finally {
-            // Guarantee worker processes are shut down
-            $pool->shutdown();
+            $pool->drain();
         }
 
         $result = new SuiteResult($results, status: $status);
         $this->eventDispatcher->dispatch(new TestSuiteFinished($suite, $result));
 
         return $result;
-    }
-
-
-    private function createWorkerPool(): ProcessPoolInterface
-    {
-        return Parallel::pool(size: $this->parallelInput->getPoolSize())
-            ->withUnlimitedMemory()
-            ->withoutTimeout()
-        ;
     }
 
     private function runCaseSequentially(CaseDefinition $caseDefinition, Filter $filter): CaseResult
@@ -212,19 +214,9 @@ final readonly class SuiteRunner
                     $this->eventDispatcher->dispatch($message->data);
                 }
             }
-        )->catch(
-            fn(\Throwable $e) => $this->createCrashResult($caseDefinition, $e)
         );
     }
 
-    /**
-     * The actual workload executed inside the child process.
-     * 
-     * Bootstraps the DI container, injects the EmittingEventDispatcher, rebuilds
-     * the Reflection objects, and runs the test case.
-     * 
-     * @internal Must be public for the serializer/worker to invoke it properly.
-     */
     public static function workerExecuteCase(string $className, string $caseType, array $methodNames, Filter $filter): CaseResult
     {
         // Boot up the container in the isolated child process
