@@ -31,4 +31,16 @@ final readonly class DataProvider implements Interceptable, DataProviderAttribut
     ) {
         $this->provider = \is_callable($provider) ? $provider(...) : $provider;
     }
+
+    public function __serialize(): array
+    {
+        return[
+            'provider' => $this->provider instanceof \Closure ? 'closure' : $this->provider,
+        ];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->provider = $data['provider'];
+    }
 }

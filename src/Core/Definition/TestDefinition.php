@@ -39,4 +39,28 @@ final readonly class TestDefinition
 
         return \trim($doc);
     }
+
+    public function __serialize(): array
+    {
+        if ($this->reflection instanceof \ReflectionMethod) {
+            return [
+                'type' => 'method',
+                'class' => $this->reflection->getDeclaringClass()->getName(),
+                'name' => $this->reflection->getName(),
+            ];
+        }
+        return [
+            'type' => 'function',
+            'name' => $this->reflection->getName(),
+        ];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        if ($data['type'] === 'method') {
+            $this->reflection = new \ReflectionMethod($data['class'], $data['name']);
+        } else {
+            $this->reflection = new \ReflectionFunction($data['name']);
+        }
+    }
 }

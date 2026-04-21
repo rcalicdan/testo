@@ -14,7 +14,6 @@ final readonly class CaseDefinition
 {
     public function __construct(
         public ?string $name,
-
         /**
          * @var non-empty-string Type of the test case, e.g. 'test', 'unit', 'inline', 'bench', etc.
          * @see TestType
@@ -22,7 +21,6 @@ final readonly class CaseDefinition
         public string $type,
         public ?\ReflectionClass $reflection = null,
         public TestDefinitions $tests = new TestDefinitions(),
-
         /**
          * @var null|\Closure(TestInfo): mixed Handler for executing the test methods in this case.
          */
@@ -46,5 +44,24 @@ final readonly class CaseDefinition
     public function getName(): string
     {
         return ($this->name ?? 'undefined') . " [{$this->type}]";
+    }
+
+    public function __serialize(): array
+    {
+        return[
+            'name' => $this->name,
+            'type' => $this->type,
+            'reflection' => $this->reflection?->getName(),
+            'tests' => $this->tests,
+        ];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->name = $data['name'];
+        $this->type = $data['type'];
+        $this->reflection = $data['reflection'] !== null ? new \ReflectionClass($data['reflection']) : null;
+        $this->tests = $data['tests'];
+        $this->handler = null;
     }
 }

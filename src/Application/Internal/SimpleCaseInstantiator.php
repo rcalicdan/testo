@@ -16,7 +16,7 @@ final class SimpleCaseInstantiator implements CaseInstance
     private ?object $instance = null;
 
     public function __construct(
-        private readonly \ReflectionClass $reflection,
+        private \ReflectionClass $reflection,
     ) {}
 
     #[\Override]
@@ -38,5 +38,18 @@ final class SimpleCaseInstantiator implements CaseInstance
         } catch (\Throwable $e) {
             throw new TestCaseInstantiationException(previous: $e);
         }
+    }
+
+    public function __serialize(): array
+    {
+        return[
+            'class' => $this->reflection->getName(),
+        ];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->reflection = new \ReflectionClass($data['class']);
+        $this->instance = null;
     }
 }

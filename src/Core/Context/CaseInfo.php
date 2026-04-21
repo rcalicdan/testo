@@ -64,4 +64,22 @@ final class CaseInfo
         /** @see self::$instance */
         return $this->cloneWith('instance', $instance);
     }
+
+    public function __serialize(): array
+    {
+        return [
+            'definition' => $this->definition,
+            'instance' => $this->instance,
+            'attributes' => $this->attributes,
+        ];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->definition = $data['definition'];
+        $this->instance = $data['instance'];
+        $this->attributes = $data['attributes'];
+        $this->name = $this->definition->getName();
+        $this->invoker = (new DefaultTestHandler())(...);
+    }
 }

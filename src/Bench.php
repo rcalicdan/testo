@@ -135,4 +135,23 @@ final readonly class Bench implements Interceptable
         $calls > 0 or throw new \InvalidArgumentException('Calls must be greater than 0.');
         $iterations > 0 or throw new \InvalidArgumentException('Iterations must be greater than 0.');
     }
+
+    public function __serialize(): array
+    {
+        return[
+            'arguments' => $this->arguments,
+            'warmup' => $this->warmup,
+            'calls' => $this->calls,
+            'iterations' => $this->iterations,
+        ];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->callables = [];
+        $this->arguments = $data['arguments'];
+        $this->warmup = $data['warmup'];
+        $this->calls = $data['calls'];
+        $this->iterations = $data['iterations'];
+    }
 }
