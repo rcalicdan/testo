@@ -90,6 +90,13 @@ final class ConfigInflector implements Inflector
             try {
                 $attribute = $attribute->newInstance();
 
+                $hasValue = match (true) {
+                    $attribute instanceof Env => \array_key_exists($attribute->name, $this->env),
+                    $attribute instanceof InputOption => \array_key_exists($attribute->name, $this->inputOptions),
+                    $attribute instanceof InputArgument => \array_key_exists($attribute->name, $this->inputArguments),
+                    default => false,
+                };
+
                 /** @var mixed $value */
                 $value = match (true) {
                     $attribute instanceof XPath => $this->getXPath($attribute),
@@ -106,7 +113,8 @@ final class ConfigInflector implements Inflector
                     default => null,
                 };
 
-                if (\in_array($value, [null, []], true)) {
+                // Skip missing values, but allow explicitly provided nulls/flags to proceed
+                if (!$hasValue && \in_array($value, [null, []], true)) {
                     continue;
                 }
 

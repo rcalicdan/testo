@@ -32,6 +32,7 @@ use Hibla\Promise\Promise;
 use Hibla\Promise\Interfaces\PromiseInterface;
 use Internal\Container\ObjectContainer;
 use Testo\Application\Config\DefaultServicesConfig;
+use Testo\Event\Test\TestPipelineFinished;
 
 use function Hibla\await;
 
@@ -192,7 +193,7 @@ final readonly class SuiteRunner
             if ($promises !== []) {
                 $settledResults = await(Promise::allSettled($promises));
 
-                foreach ($settledResults as $index => $settled) {
+               foreach ($settledResults as $index => $settled) {
                     if ($settled->isFulfilled()) {
                         /** @var CaseResult $caseResult */
                         $caseResult = $settled->value;
@@ -202,10 +203,19 @@ final readonly class SuiteRunner
                             $status = Status::Failed;
                         }
                     } elseif ($settled->isRejected()) {
-                        // Worker hard-crashed (OOM, Segfault, Timeout)
+                        // Worker hard-crashed (OOM, Segfault, Timeout, or Serialization Error)
                         // map the failure to a synthetic CaseResult so Testo reports it gracefully
                         $status = Status::Error;
-                        $results[] = $this->createCrashResult($dispatchedCases[$index], $settled->reason);
+                        $crashResult = $this->createCrashResult($dispatchedCases[$index], $settled->reason);
+                        $results[] = $crashResult;
+
+                        // tells the TerminalLogger to actually print the failure details
+                        // for the synthetic "Parallel Worker Crash" test result.
+                        foreach ($crashResult->results as $testResult) {
+                            $this->eventDispatcher->dispatch(
+                                new TestPipelineFinished($testResult->info, $testResult)
+                            );
+                        }
                     }
                 }
             }
