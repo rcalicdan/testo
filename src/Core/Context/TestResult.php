@@ -46,4 +46,25 @@ final class TestResult
     {
         return $this->cloneWith('failure', $failure);
     }
+
+    public function __serialize(): array
+    {
+        return [
+            'info' => $this->info,
+            'status' => $this->status,
+            // If a test literally returned a Closure, drop it
+            'result' => $this->result instanceof \Closure ? null : $this->result,
+            'failure' => $this->failure,
+            'attributes' => $this->attributes,
+        ];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->info = $data['info'];
+        $this->status = $data['status'];
+        $this->result = $data['result'];
+        $this->failure = $data['failure'];
+        $this->attributes = $data['attributes'];
+    }
 }

@@ -46,4 +46,28 @@ final class TestInfo
             attributes: $this->attributes,
         );
     }
+
+    public function __serialize(): array
+    {
+        $attrs = $this->attributes;
+        // Strip out reflections injected by the Lifecycle Interceptor
+        unset($attrs[\Testo\Lifecycle\Internal\LifecycleInterceptor::class]);
+
+        return [
+            'name' => $this->name,
+            'caseInfo' => $this->caseInfo,
+            'testDefinition' => $this->testDefinition,
+            'arguments' => [],
+            'attributes' => $attrs,
+        ];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->name = $data['name'];
+        $this->caseInfo = $data['caseInfo'];
+        $this->testDefinition = $data['testDefinition'];
+        $this->arguments = $data['arguments'];
+        $this->attributes = $data['attributes'];
+    }
 }

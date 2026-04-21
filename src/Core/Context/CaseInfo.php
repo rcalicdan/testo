@@ -67,19 +67,22 @@ final class CaseInfo
 
     public function __serialize(): array
     {
+        $attrs = $this->attributes;
+        // Strip out reflections injected by the Lifecycle Interceptor
+        unset($attrs[\Testo\Lifecycle\Internal\LifecycleInterceptor::class]);
+
         return [
             'definition' => $this->definition,
-            'instance' => $this->instance,
-            'attributes' => $this->attributes,
+            'attributes' => $attrs,
         ];
     }
 
     public function __unserialize(array $data): void
     {
         $this->definition = $data['definition'];
-        $this->instance = $data['instance'];
         $this->attributes = $data['attributes'];
         $this->name = $this->definition->getName();
-        $this->invoker = (new DefaultTestHandler())(...);
+        $this->invoker = static fn() => null;
+        $this->instance = null;
     }
 }

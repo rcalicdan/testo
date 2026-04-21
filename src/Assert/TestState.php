@@ -32,4 +32,17 @@ final class TestState
      * @var list<callable(TestResult, TestState): TestResult> List of expectation handlers.
      */
     public array $expectations = [];
+
+    public function __serialize(): array
+    {
+        return [
+            'history' => $this->history,
+        ];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->history = $data['history'];
+        $this->expectations = [];
+    }
 }
