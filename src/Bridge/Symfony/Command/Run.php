@@ -11,6 +11,8 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Testo\Output\Teamcity\TeamcityPlugin;
 use Testo\Output\Terminal\TerminalPlugin;
+use Testo\Output\Terminal\Renderer\TerminalLogger;
+use Testo\Output\Terminal\Renderer\OutputFormat;
 
 /**
  * Executes test suites with optional filtering and custom output formatting.
@@ -54,6 +56,9 @@ use Testo\Output\Terminal\TerminalPlugin;
  *
  *  # Run tests with custom config
  *  ./bin/testo run --config=./testo.php
+ * 
+ *  # Run tests in parallel
+ *  ./bin/testo run --parallel --errors-only
  * ```
  *
  * @internal
@@ -104,15 +109,38 @@ final class Run extends Base
             InputOption::VALUE_NONE,
             'Disable code coverage collection',
         );
+        $this->addOption(
+            'parallel',
+            'p',
+            InputOption::VALUE_OPTIONAL,
+            'Run tests in parallel. Optionally specify the number of worker processes.',
+            false
+        );
+        $this->addOption(
+            'errors-only',
+            null,
+            InputOption::VALUE_NONE,
+            'Hide passed tests output and only display errors (Recommended for parallel testing)'
+        );
     }
 
     public function __invoke(
         InputInterface  $input,
         OutputInterface $output,
     ): int {
-        $input->getOption('teamcity')
-            ? $this->container->get(TeamcityPlugin::class)->configure($this->container)
-            : $this->container->get(TerminalPlugin::class)->configure($this->container);
+        $errorsOnly = $input->getOption('errors-only') !== false;
+
+        if ($input->getOption('teamcity')) {
+            $this->container->get(TeamcityPlugin::class)->configure($this->container);
+        } else {
+            // Bind the TerminalLogger manually to pass the custom errorsOnly flag
+            $this->container->bind(
+                TerminalLogger::class, 
+                fn() => new TerminalLogger(OutputFormat::Compact, $errorsOnly)
+            );
+            
+            $this->container->get(TerminalPlugin::class)->configure($this->container);
+        }
 
         $result = $this->application->run();
 

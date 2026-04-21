@@ -7,8 +7,13 @@ namespace Testo\Application\Internal\Runner;
 use Psr\EventDispatcher\EventDispatcherInterface;
 use Testo\Application\Internal\SimpleCaseInstantiator;
 use Testo\Core\Context\CaseInfo;
+use Testo\Core\Context\CaseResult;
+use Testo\Core\Context\TestInfo;
+use Testo\Core\Context\TestResult;
 use Testo\Core\Context\SuiteInfo;
 use Testo\Core\Context\SuiteResult;
+use Testo\Core\Definition\CaseDefinition;
+use Testo\Core\Definition\TestDefinition;
 use Testo\Core\Internal\DefaultTestHandler;
 use Testo\Core\Value\Status;
 use Testo\Event\TestSuite\TestSuiteFinished;
@@ -19,6 +24,18 @@ use Testo\Filter;
 use Testo\Pipeline\InterceptorProvider;
 use Testo\Pipeline\Middleware\TestSuiteRunInterceptor;
 use Testo\Pipeline\Pipeline;
+use Testo\Parallel\Internal\ParallelInput;
+use Hibla\Parallel\Parallel;
+use Hibla\Parallel\Interfaces\ProcessPoolInterface;
+use Hibla\Parallel\Utilities\SystemUtilities;
+use Hibla\Parallel\ValueObjects\WorkerMessage;
+use Hibla\Promise\Promise;
+use Hibla\Promise\Interfaces\PromiseInterface;
+use Internal\Container\ObjectContainer;
+use Testo\Application\Config\DefaultServicesConfig;
+use Testo\Common\Info;
+
+use function Hibla\await;
 
 /**
  * A test suite runner that executes a suite of tests and returns the results.
@@ -32,6 +49,7 @@ final readonly class SuiteRunner
         private CaseRunner $caseRunner,
         private InterceptorProvider $interceptorProvider,
         private EventDispatcherInterface $eventDispatcher,
+        private ParallelInput $parallelInput,
     ) {}
 
     public function runSuite(SuiteInfo $info, Filter $filter): SuiteResult
@@ -64,8 +82,19 @@ final readonly class SuiteRunner
         # Apply suite name filter if exists
         $suite->name === null or $filter = $filter->with(testSuites: [$suite->name]);
 
-        // todo if random, run in random order?
+        // Route to parallel implementation if requested
+        if ($this->parallelInput->isEnabled()) {
+            return $this->runParallel($suite, $filter);
+        }
 
+        return $this->runSequentially($suite, $filter);
+    }
+
+    /**
+     * Executes test cases sequentially (Default original behavior).
+     */
+    private function runSequentially(SuiteInfo $suite, Filter $filter): SuiteResult
+    {
         $runner = $this->caseRunner;
         $results = [];
         $status = Status::Passed;
@@ -96,5 +125,152 @@ final readonly class SuiteRunner
 
         $this->eventDispatcher->dispatch(new TestSuiteFinished($suite, $result));
         return $result;
+    }
+
+    /**
+     * Executes test cases in parallel utilizing Hibla Process Pools.
+     */
+    private function runParallel(SuiteInfo $suite, Filter $filter): SuiteResult
+    {
+        $results = [];
+        $status = Status::Passed;
+        $promises = [];
+
+        $pool = $this->createWorkerPool();
+
+        foreach ($suite->testCases->getCases() as $caseDefinition) {
+            // Fallback to sequential for standalone (procedural) functions as they lack a ReflectionClass container
+            if ($caseDefinition->reflection?->getName() === null) {
+                $res = $this->runCaseSequentially($caseDefinition, $filter);
+                $res->status->isFailure() and $status = Status::Failed;
+                $results[] = $res;
+                continue;
+            }
+
+            // Dispatch task to Hibla Process Pool
+            $promises[] = $this->dispatchCaseToPool($pool, $caseDefinition, $filter);
+        }
+
+        try {
+            // Await all parallel execution promises to complete
+            if ($promises !== []) {
+                /** @var list<CaseResult> $caseResults */
+                $caseResults = await(Promise::all($promises));
+
+                foreach ($caseResults as $caseResult) {
+                    $results[] = $caseResult;
+                    if ($caseResult->status->isFailure()) {
+                        $status = Status::Failed;
+                    }
+                }
+            }
+        } finally {
+            // Guarantee worker processes are shut down
+            $pool->shutdown();
+        }
+
+        $result = new SuiteResult($results, status: $status);
+        $this->eventDispatcher->dispatch(new TestSuiteFinished($suite, $result));
+
+        return $result;
+    }
+
+
+    private function createWorkerPool(): ProcessPoolInterface
+    {
+        return Parallel::pool(size: $this->parallelInput->getPoolSize())
+            ->withUnlimitedMemory()
+            ->withoutTimeout()
+        ;
+    }
+
+    private function runCaseSequentially(CaseDefinition $caseDefinition, Filter $filter): CaseResult
+    {
+        $caseInfo = new CaseInfo(
+            definition: $caseDefinition,
+            instance: null,
+            invoker: $caseDefinition->handler ?? (new DefaultTestHandler())(...),
+        );
+
+        return $this->caseRunner->runCase($caseInfo, $filter);
+    }
+
+    private function dispatchCaseToPool(ProcessPoolInterface $pool, CaseDefinition $caseDefinition, Filter $filter): PromiseInterface
+    {
+        $className = $caseDefinition->reflection->getName();
+        $caseType = $caseDefinition->type;
+        $methodNames = \array_keys($caseDefinition->tests->getTests());
+
+        return $pool->run(
+            static fn() => self::workerExecuteCase($className, $caseType, $methodNames, $filter),
+
+            // The Parent Process Message Handler (receives emit() calls)
+            onMessage: function (WorkerMessage $message): void {
+                // Dispatch the worker's events natively into the parent's event bus
+                // allowing TerminalLogger to print test checkmarks in real-time!
+                if (\is_object($message->data)) {
+                    $this->eventDispatcher->dispatch($message->data);
+                }
+            }
+        )->catch(
+            fn(\Throwable $e) => $this->createCrashResult($caseDefinition, $e)
+        );
+    }
+
+    /**
+     * The actual workload executed inside the child process.
+     * 
+     * Bootstraps the DI container, injects the EmittingEventDispatcher, rebuilds
+     * the Reflection objects, and runs the test case.
+     * 
+     * @internal Must be public for the serializer/worker to invoke it properly.
+     */
+    public static function workerExecuteCase(string $className, string $caseType, array $methodNames, Filter $filter): CaseResult
+    {
+        // Boot up the container in the isolated child process
+        $container = new ObjectContainer();
+        (new DefaultServicesConfig())->configure($container);
+
+        // Hook into EventDispatcher to beam events back to the parent in real-time
+        $realDispatcher = $container->get(EventDispatcherInterface::class);
+        $container->set(new EmittingEventDispatcher($realDispatcher), EventDispatcherInterface::class);
+
+        // Reconstruct Reflection and CaseDefinitions natively in the worker
+        $reflection = new \ReflectionClass($className);
+        $caseDef = new CaseDefinition(
+            name: $reflection->getShortName(),
+            type: $caseType,
+            reflection: $reflection
+        );
+
+        foreach ($methodNames as $methodName) {
+            $caseDef->tests->define($reflection->getMethod($methodName));
+        }
+
+        $caseInfo = new CaseInfo(
+            definition: $caseDef,
+            instance: new SimpleCaseInstantiator($reflection),
+            invoker: new DefaultTestHandler()
+        );
+
+        $runner = $container->get(CaseRunner::class);
+        return $runner->runCase($caseInfo, $filter);
+    }
+
+    private function createCrashResult(CaseDefinition $caseDefinition, \Throwable $e): CaseResult
+    {
+        $testInfo = new TestInfo(
+            name: 'Parallel Worker Crash',
+            caseInfo: new CaseInfo(definition: $caseDefinition),
+            testDefinition: new TestDefinition(new \ReflectionFunction(static fn() => null))
+        );
+
+        $testResult = new TestResult(
+            info: $testInfo,
+            status: Status::Error,
+            failure: $e
+        );
+
+        return new CaseResult([$testResult], Status::Error);
     }
 }
