@@ -85,10 +85,15 @@
         "psalm": "psalm",
         "psalm:baseline": "psalm --set-baseline=psalm-baseline.xml",
         "psalm:ci": "psalm --output-format=github --shepherd --show-info=false --stats --threads=4",
-        "test": "bin/testo",
+        "test": "bin/testo run",
+        "test:parallel": "bin/testo run --parallel --errors-only",
         "test:ci": [
             "@putenv TESTO_CI=1",
-            "bin/testo"
+            "bin/testo run"
+        ],
+        "test:ci:parallel": [
+            "@putenv TESTO_CI=1",
+            "bin/testo run --parallel --errors-only"
         ]
     }
 }

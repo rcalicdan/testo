@@ -33,8 +33,8 @@ final class ParallelInput
      */
     public function getPoolSize(): int
     {
-        if (is_numeric($this->parallel) && (int)$this->parallel > 0) {
-            return (int)$this->parallel;
+        if (\is_numeric($this->parallel) && (int) $this->parallel > 0) {
+            return (int) $this->parallel;
         }
 
         // Default to logical CPU count utilizing Hibla's utilities

@@ -56,7 +56,7 @@ use Testo\Output\Terminal\Renderer\OutputFormat;
  *
  *  # Run tests with custom config
  *  ./bin/testo run --config=./testo.php
- * 
+ *
  *  # Run tests in parallel
  *  ./bin/testo run --parallel --errors-only
  * ```
@@ -114,13 +114,13 @@ final class Run extends Base
             'p',
             InputOption::VALUE_OPTIONAL,
             'Run tests in parallel. Optionally specify the number of worker processes.',
-            false
+            false,
         );
         $this->addOption(
             'errors-only',
             null,
             InputOption::VALUE_NONE,
-            'Hide passed tests output and only display errors (Recommended for parallel testing)'
+            'Hide passed tests output and only display errors (Recommended for parallel testing)',
         );
     }
 
@@ -135,10 +135,10 @@ final class Run extends Base
         } else {
             // Bind the TerminalLogger manually to pass the custom errorsOnly flag
             $this->container->bind(
-                TerminalLogger::class, 
-                fn() => new TerminalLogger(OutputFormat::Compact, $errorsOnly)
+                TerminalLogger::class,
+                static fn() => new TerminalLogger(OutputFormat::Compact, $errorsOnly),
             );
-            
+
             $this->container->get(TerminalPlugin::class)->configure($this->container);
         }
 

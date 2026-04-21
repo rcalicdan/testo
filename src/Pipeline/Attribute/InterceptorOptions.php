@@ -25,7 +25,6 @@ final class InterceptorOptions
     public const ORDER_FILTER = -200_000_000;
 
     public const ORDER_DATA_PROVIDER = -200_000;
-
     public const ORDER_DEFAULT = 0;
 
     /**

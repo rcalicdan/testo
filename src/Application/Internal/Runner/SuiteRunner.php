@@ -50,6 +50,38 @@ final readonly class SuiteRunner
         private ParallelInput $parallelInput,
     ) {}
 
+    public static function workerExecuteCase(string $className, string $caseType, array $methodNames, Filter $filter): CaseResult
+    {
+        // Boot up the container in the isolated child process
+        $container = new ObjectContainer();
+        (new DefaultServicesConfig())->configure($container);
+
+        // Hook into EventDispatcher to beam events back to the parent in real-time
+        $realDispatcher = $container->get(EventDispatcherInterface::class);
+        $container->set(new EmittingEventDispatcher($realDispatcher), EventDispatcherInterface::class);
+
+        // Reconstruct Reflection and CaseDefinitions natively in the worker
+        $reflection = new \ReflectionClass($className);
+        $caseDef = new CaseDefinition(
+            name: $reflection->getShortName(),
+            type: $caseType,
+            reflection: $reflection,
+        );
+
+        foreach ($methodNames as $methodName) {
+            $caseDef->tests->define($reflection->getMethod($methodName));
+        }
+
+        $caseInfo = new CaseInfo(
+            definition: $caseDef,
+            instance: new SimpleCaseInstantiator($reflection),
+            invoker: new DefaultTestHandler(),
+        );
+
+        $runner = $container->get(CaseRunner::class);
+        return $runner->runCase($caseInfo, $filter);
+    }
+
     public function runSuite(SuiteInfo $info, Filter $filter): SuiteResult
     {
         /**
@@ -137,7 +169,8 @@ final readonly class SuiteRunner
 
         $pool = Parallel::pool(size: $this->parallelInput->getPoolSize())
             ->withoutTimeout()
-            ->withUnlimitedMemory();;
+            ->withUnlimitedMemory();
+        ;
 
         foreach ($suite->testCases->getCases() as $caseDefinition) {
             // Fallback to sequential for standalone (procedural) functions as they lack a ReflectionClass container
@@ -213,40 +246,8 @@ final readonly class SuiteRunner
                 if (\is_object($message->data)) {
                     $this->eventDispatcher->dispatch($message->data);
                 }
-            }
+            },
         );
-    }
-
-    public static function workerExecuteCase(string $className, string $caseType, array $methodNames, Filter $filter): CaseResult
-    {
-        // Boot up the container in the isolated child process
-        $container = new ObjectContainer();
-        (new DefaultServicesConfig())->configure($container);
-
-        // Hook into EventDispatcher to beam events back to the parent in real-time
-        $realDispatcher = $container->get(EventDispatcherInterface::class);
-        $container->set(new EmittingEventDispatcher($realDispatcher), EventDispatcherInterface::class);
-
-        // Reconstruct Reflection and CaseDefinitions natively in the worker
-        $reflection = new \ReflectionClass($className);
-        $caseDef = new CaseDefinition(
-            name: $reflection->getShortName(),
-            type: $caseType,
-            reflection: $reflection
-        );
-
-        foreach ($methodNames as $methodName) {
-            $caseDef->tests->define($reflection->getMethod($methodName));
-        }
-
-        $caseInfo = new CaseInfo(
-            definition: $caseDef,
-            instance: new SimpleCaseInstantiator($reflection),
-            invoker: new DefaultTestHandler()
-        );
-
-        $runner = $container->get(CaseRunner::class);
-        return $runner->runCase($caseInfo, $filter);
     }
 
     private function createCrashResult(CaseDefinition $caseDefinition, \Throwable $e): CaseResult
@@ -254,13 +255,13 @@ final readonly class SuiteRunner
         $testInfo = new TestInfo(
             name: 'Parallel Worker Crash',
             caseInfo: new CaseInfo(definition: $caseDefinition),
-            testDefinition: new TestDefinition(new \ReflectionFunction(static fn() => null))
+            testDefinition: new TestDefinition(new \ReflectionFunction(static fn() => null)),
         );
 
         $testResult = new TestResult(
             info: $testInfo,
             status: Status::Error,
-            failure: $e
+            failure: $e,
         );
 
         return new CaseResult([$testResult], Status::Error);

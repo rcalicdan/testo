@@ -195,6 +195,30 @@ final class TerminalLogger
     }
 
     /**
+     * Builds a fully qualified test name with suite, case, method, and dataset.
+     *
+     * Format: Suite / CaseName :: methodName > DatasetName
+     *
+     * @return non-empty-string
+     */
+    private static function buildFullTestName(
+        TestInfo $info,
+        ?string $suiteName,
+        ?string $datasetName,
+    ): string {
+        $parts = [];
+
+        $suiteName !== null and $parts[] = $suiteName;
+        $parts[] = $info->caseInfo->name;
+
+        $name = \implode(' / ', $parts) . ' :: ' . $info->name;
+
+        $datasetName !== null and $name .= ' > ' . $datasetName;
+
+        return $name;
+    }
+
+    /**
      * Handles passed test status.
      *
      * @param int<0, max>|null $duration
@@ -267,7 +291,7 @@ final class TerminalLogger
 
         $runNumber = 1;
         foreach ($multipleResult->results as $runKey => $runResult) {
-            
+
             if ($this->displayErrorsOnly && !$runResult->status->isFailure()) {
                 $runNumber++;
                 continue;
@@ -404,30 +428,6 @@ final class TerminalLogger
 
             $index++;
         }
-    }
-
-    /**
-     * Builds a fully qualified test name with suite, case, method, and dataset.
-     *
-     * Format: Suite / CaseName :: methodName > DatasetName
-     *
-     * @return non-empty-string
-     */
-    private static function buildFullTestName(
-        TestInfo $info,
-        ?string $suiteName,
-        ?string $datasetName,
-    ): string {
-        $parts = [];
-
-        $suiteName !== null and $parts[] = $suiteName;
-        $parts[] = $info->caseInfo->name;
-
-        $name = \implode(' / ', $parts) . ' :: ' . $info->name;
-
-        $datasetName !== null and $name .= ' > ' . $datasetName;
-
-        return $name;
     }
 
     /**
