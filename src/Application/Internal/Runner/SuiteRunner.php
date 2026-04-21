@@ -30,8 +30,7 @@ use Hibla\Parallel\Interfaces\ProcessPoolInterface;
 use Hibla\Parallel\ValueObjects\WorkerMessage;
 use Hibla\Promise\Promise;
 use Hibla\Promise\Interfaces\PromiseInterface;
-use Internal\Container\ObjectContainer;
-use Testo\Application\Config\DefaultServicesConfig;
+use Testo\Common\Info;
 
 use function Hibla\await;
 
@@ -45,52 +44,14 @@ final readonly class SuiteRunner
 {
     public function __construct(
         private CaseRunner $caseRunner,
+        private TestRunner $testRunner, 
         private InterceptorProvider $interceptorProvider,
         private EventDispatcherInterface $eventDispatcher,
         private ParallelInput $parallelInput,
     ) {}
 
-    public static function workerExecuteCase(string $className, string $caseType, array $methodNames, Filter $filter): CaseResult
-    {
-        // Boot up the container in the isolated child process
-        $container = new ObjectContainer();
-        (new DefaultServicesConfig())->configure($container);
-
-        // Hook into EventDispatcher to beam events back to the parent in real-time
-        $realDispatcher = $container->get(EventDispatcherInterface::class);
-        $container->set(new EmittingEventDispatcher($realDispatcher), EventDispatcherInterface::class);
-
-        // Reconstruct Reflection and CaseDefinitions natively in the worker
-        $reflection = new \ReflectionClass($className);
-        $caseDef = new CaseDefinition(
-            name: $reflection->getShortName(),
-            type: $caseType,
-            reflection: $reflection,
-        );
-
-        foreach ($methodNames as $methodName) {
-            $caseDef->tests->define($reflection->getMethod($methodName));
-        }
-
-        $caseInfo = new CaseInfo(
-            definition: $caseDef,
-            instance: new SimpleCaseInstantiator($reflection),
-            invoker: new DefaultTestHandler(),
-        );
-
-        $runner = $container->get(CaseRunner::class);
-        return $runner->runCase($caseInfo, $filter);
-    }
-
     public function runSuite(SuiteInfo $info, Filter $filter): SuiteResult
     {
-        /**
-         * Prepare interceptors pipeline
-         *
-         * @see TestSuiteRunInterceptor::runTestSuite()
-         * @var list<TestSuiteRunInterceptor> $interceptors
-         * @var callable(SuiteInfo): SuiteResult $pipeline
-         */
         $interceptors = $this->interceptorProvider->fromConfig(TestSuiteRunInterceptor::class);
         $pipeline = Pipeline::prepare($filter->type, ...$interceptors)
             ->with(
@@ -108,11 +69,8 @@ final readonly class SuiteRunner
     public function run(SuiteInfo $suite, Filter $filter): SuiteResult
     {
         $this->eventDispatcher->dispatch(new TestSuiteStarting($suite));
-
-        # Apply suite name filter if exists
         $suite->name === null or $filter = $filter->with(testSuites: [$suite->name]);
 
-        // Route to parallel implementation if requested
         if ($this->parallelInput->isEnabled()) {
             return $this->runParallel($suite, $filter);
         }
@@ -120,150 +78,141 @@ final readonly class SuiteRunner
         return $this->runSequentially($suite, $filter);
     }
 
-    /**
-     * Executes test cases sequentially (Default original behavior).
-     */
     private function runSequentially(SuiteInfo $suite, Filter $filter): SuiteResult
     {
-        $runner = $this->caseRunner;
         $results = [];
         $status = Status::Passed;
 
-        // Todo: unhardcode
-        $handler = (new DefaultTestHandler())(...);
-
-        # Run tests for each case
         foreach ($suite->testCases->getCases() as $caseDefinition) {
             try {
-                $caseInfo = new CaseInfo(
-                    definition: $caseDefinition,
-                    instance: $caseDefinition->reflection === null
-                        ? null
-                        : new SimpleCaseInstantiator($caseDefinition->reflection),
-                    invoker: $caseDefinition->handler ?? $handler,
-                );
-                $result = $runner->runCase($caseInfo, $filter);
+                $caseInfo = $this->createCaseInfo($caseDefinition);
+                $result = $this->caseRunner->runCase($caseInfo, $filter);
                 $result->status->isFailure() and $status = Status::Failed;
                 $results[] = $result;
             } catch (\Throwable) {
-                // Skip for now
                 $status = Status::Error;
             }
         }
 
         $result = new SuiteResult($results, status: $status);
-
         $this->eventDispatcher->dispatch(new TestSuiteFinished($suite, $result));
         return $result;
     }
 
-    /**
-     * Executes test cases in parallel utilizing Hibla Process Pools.
-     */
     private function runParallel(SuiteInfo $suite, Filter $filter): SuiteResult
     {
-        $results = [];
+        $caseResults = [];
         $status = Status::Passed;
-        $promises = [];
-        $dispatchedCases = [];
-
-        $pool = Parallel::pool(size: $this->parallelInput->getPoolSize())
-            ->withoutTimeout()
-            ->withUnlimitedMemory();
-        ;
+        $pool = $this->createWorkerPool();
 
         foreach ($suite->testCases->getCases() as $caseDefinition) {
-            // Fallback to sequential for standalone (procedural) functions as they lack a ReflectionClass container
-            if ($caseDefinition->reflection?->getName() === null) {
-                $res = $this->runCaseSequentially($caseDefinition, $filter);
-                $res->status->isFailure() and $status = Status::Failed;
-                $results[] = $res;
+            $className = $caseDefinition->reflection?->getName();
+
+            // Run procedural functions sequentially as they often share global state
+            if ($className === null) {
+                $caseResults[] = $this->runCaseSequentially($caseDefinition, $filter);
                 continue;
             }
 
-            // Dispatch task to Hibla Process Pool
-            $promises[] = $this->dispatchCaseToPool($pool, $caseDefinition, $filter);
-            $dispatchedCases[] = $caseDefinition;
-        }
+            // Parallelize at the TEST METHOD level
+            $testPromises = [];
+            $testDefinitions = [];
+            
+            foreach ($caseDefinition->tests->getTests() as $name => $testDefinition) {
+                $testPromises[] = $this->dispatchTestToPool($pool, $className, $caseDefinition, $testDefinition, $filter);
+                $testDefinitions[] = $testDefinition;
+            }
 
-        try {
-            // Await all parallel execution promises to complete safely using allSettled()
-            // This guarantees one crashing worker won't cancel the remaining workers.
-            if ($promises !== []) {
-                $settledResults = await(Promise::allSettled($promises));
+            try {
+                $settled = await(Promise::allSettled($testPromises));
+                $methodResults = [];
+                $caseStatus = Status::Passed;
 
-                foreach ($settledResults as $index => $settled) {
-                    if ($settled->isFulfilled()) {
-                        /** @var CaseResult $caseResult */
-                        $caseResult = $settled->value;
-                        $results[] = $caseResult;
-
-                        if ($caseResult->status->isFailure()) {
-                            $status = Status::Failed;
-                        }
-                    } elseif ($settled->isRejected()) {
-                        // Worker hard-crashed (OOM, Segfault, Timeout)
-                        // map the failure to a synthetic CaseResult so Testo reports it gracefully
-                        $status = Status::Error;
-                        $results[] = $this->createCrashResult($dispatchedCases[$index], $settled->reason);
+                foreach ($settled as $index => $res) {
+                    if ($res->isFulfilled()) {
+                        $methodResults[] = $res->value;
+                        if ($res->value->status->isFailure()) $caseStatus = Status::Failed;
+                    } else {
+                        $caseStatus = Status::Error;
+                        $methodResults[] = $this->createCrashTestResult($caseDefinition, $testDefinitions[$index], $res->reason);
                     }
                 }
+
+                $caseResults[] = new CaseResult($methodResults, $caseStatus);
+                if ($caseStatus->isFailure()) $status = Status::Failed;
+
+            } catch (\Throwable) {
+                $status = Status::Error;
             }
-        } finally {
-            $pool->drain();
         }
 
-        $result = new SuiteResult($results, status: $status);
+        $pool->drain();
+        $result = new SuiteResult($caseResults, status: $status);
         $this->eventDispatcher->dispatch(new TestSuiteFinished($suite, $result));
-
+        
         return $result;
     }
 
-    private function runCaseSequentially(CaseDefinition $caseDefinition, Filter $filter): CaseResult
+    private function dispatchTestToPool(ProcessPoolInterface $pool, string $className, CaseDefinition $caseDef, TestDefinition $testDef, Filter $filter): PromiseInterface
     {
-        $caseInfo = new CaseInfo(
-            definition: $caseDefinition,
-            instance: null,
-            invoker: $caseDefinition->handler ?? (new DefaultTestHandler())(...),
-        );
-
-        return $this->caseRunner->runCase($caseInfo, $filter);
-    }
-
-    private function dispatchCaseToPool(ProcessPoolInterface $pool, CaseDefinition $caseDefinition, Filter $filter): PromiseInterface
-    {
-        $className = $caseDefinition->reflection->getName();
-        $caseType = $caseDefinition->type;
-        $methodNames = \array_keys($caseDefinition->tests->getTests());
+        $methodName = $testDef->reflection->getName();
+        $caseType = $caseDef->type;
 
         return $pool->run(
-            static fn() => self::workerExecuteCase($className, $caseType, $methodNames, $filter),
-
-            // The Parent Process Message Handler (receives emit() calls)
+            static fn() => self::workerExecuteTest($className, $methodName, $caseType, $filter),
             onMessage: function (WorkerMessage $message): void {
-                // Dispatch the worker's events natively into the parent's event bus
-                // allowing TerminalLogger to print test checkmarks in real-time!
-                if (\is_object($message->data)) {
+                if (is_object($message->data)) {
                     $this->eventDispatcher->dispatch($message->data);
                 }
-            },
+            }
         );
     }
 
-    private function createCrashResult(CaseDefinition $caseDefinition, \Throwable $e): CaseResult
+    /**
+     * WORKER ENTRY POINT: Runs a single test method.
+     */
+    public static function workerExecuteTest(string $className, string $methodName, string $caseType, Filter $filter): TestResult
     {
-        $testInfo = new TestInfo(
-            name: 'Parallel Worker Crash',
-            caseInfo: new CaseInfo(definition: $caseDefinition),
-            testDefinition: new TestDefinition(new \ReflectionFunction(static fn() => null)),
-        );
+        $container = new \Internal\Container\ObjectContainer();
+        (new \Testo\Application\Config\DefaultServicesConfig())->configure($container);
 
-        $testResult = new TestResult(
-            info: $testInfo,
-            status: Status::Error,
-            failure: $e,
-        );
+        $realDispatcher = $container->get(EventDispatcherInterface::class);
+        $container->set(new EmittingEventDispatcher($realDispatcher), EventDispatcherInterface::class);
 
-        return new CaseResult([$testResult], Status::Error);
+        $reflection = new \ReflectionClass($className);
+        $caseDef = new CaseDefinition($reflection->getShortName(), $caseType, $reflection);
+        $testDef = $caseDef->tests->define($reflection->getMethod($methodName));
+
+        $caseInfo = new CaseInfo($caseDef, new SimpleCaseInstantiator($reflection), [], new DefaultTestHandler());
+        $testInfo = new TestInfo($methodName, $caseInfo, $testDef);
+
+        return $container->get(TestRunner::class)->runTest($testInfo);
+    }
+
+    private function createCaseInfo(CaseDefinition $def): CaseInfo
+    {
+        return new CaseInfo(
+            definition: $def,
+            instance: $def->reflection === null ? null : new SimpleCaseInstantiator($def->reflection),
+            invoker: $def->handler ?? (new DefaultTestHandler())(...)
+        );
+    }
+
+    private function createWorkerPool(): ProcessPoolInterface
+    {
+        return Parallel::pool(size: $this->parallelInput->getPoolSize())
+            ->withoutTimeout()
+            ->withBootstrap(Info::ROOT_DIR . '/vendor/autoload.php');
+    }
+
+    private function runCaseSequentially(CaseDefinition $def, Filter $filter): CaseResult
+    {
+        return $this->caseRunner->runCase($this->createCaseInfo($def), $filter);
+    }
+
+    private function createCrashTestResult(CaseDefinition $caseDef, TestDefinition $testDef, \Throwable $e): TestResult
+    {
+        $info = new TestInfo($testDef->reflection->getName(), new CaseInfo($caseDef), $testDef);
+        return new TestResult($info, Status::Error, failure: $e);
     }
 }
