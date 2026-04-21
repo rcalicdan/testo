@@ -59,6 +59,7 @@ final class TerminalLogger
 
     public function __construct(
         private readonly OutputFormat $format = OutputFormat::Compact,
+        private readonly bool $displayErrorsOnly = false,
     ) {}
 
     /**
@@ -83,6 +84,9 @@ final class TerminalLogger
      */
     public function caseStartedFromInfo(CaseInfo $info): void
     {
+        if ($this->displayErrorsOnly) {
+            return;
+        }
         echo Formatter::caseHeader($info->name, $this->format);
     }
 
@@ -91,6 +95,9 @@ final class TerminalLogger
      */
     public function handleCaseResult(CaseInfo $info, CaseResult $result): void
     {
+        if ($this->displayErrorsOnly && !$result->status->isFailure()) {
+            return;
+        }
         echo Formatter::caseFooter($this->format);
         echo Formatter::caseSummary($result, $this->format);
     }
@@ -102,7 +109,7 @@ final class TerminalLogger
     {
         $this->currentIndentLevel = 1;
 
-        if ($this->format === OutputFormat::Dots) {
+        if ($this->format === OutputFormat::Dots || $this->displayErrorsOnly) {
             return;
         }
 
@@ -196,6 +203,11 @@ final class TerminalLogger
     {
         $this->passedTests++;
 
+        if ($this->displayErrorsOnly) {
+            $this->currentTestName = null;
+            return;
+        }
+
         $item = new FormattedItem(
             name: $this->currentTestName ?? $result->info->name,
             status: $result->status,
@@ -255,6 +267,12 @@ final class TerminalLogger
 
         $runNumber = 1;
         foreach ($multipleResult->results as $runKey => $runResult) {
+            
+            if ($this->displayErrorsOnly && !$runResult->status->isFailure()) {
+                $runNumber++;
+                continue;
+            }
+
             $item = new FormattedItem(
                 name: "Run #{$runNumber}",
                 status: $runResult->status,
@@ -295,6 +313,11 @@ final class TerminalLogger
     {
         $this->skippedTests++;
 
+        if ($this->displayErrorsOnly) {
+            $this->currentTestName = null;
+            return;
+        }
+
         $item = new FormattedItem(
             name: $this->currentTestName ?? $result->info->name,
             status: $result->status,
@@ -314,6 +337,11 @@ final class TerminalLogger
     private function handleRiskyTest(TestResult $result, ?int $duration): void
     {
         $this->riskyTests++;
+
+        if ($this->displayErrorsOnly) {
+            $this->currentTestName = null;
+            return;
+        }
 
         $item = new FormattedItem(
             name: $this->currentTestName ?? $result->info->name,
